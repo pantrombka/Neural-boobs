@@ -1,105 +1,90 @@
-import torch
-import torchvision
-import torchvision.transforms as transforms
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 from torchvision.datasets import ImageFolder
-from torchvision.transforms import ToTensor
+from collections import namedtuple
 from torch.utils.data import DataLoader
+import torch
 from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torchvision import transforms, datasets
+from torchvision import datasets, transforms
+
+
+Params = namedtuple('Params', ['batch_size', 'test_batch_size', 'epochs', 'lr', 'momentum', 'seed', 'cuda', 'log_interval'])
+args = Params(batch_size=64, test_batch_size=1000, epochs=10, lr=0.01, momentum=0.5, seed=1, cuda=False, log_interval=200)
+
+
 
 data = ImageFolder(root='img-train', transform= transforms.ToTensor())
 data2 = ImageFolder(root='img-valid', transform= transforms.ToTensor())
-trainloader = DataLoader(data)
-testloader = DataLoader(data2)
+train_loader = DataLoader(data)
+test_loader = DataLoader(data2)
 classes = ('before', 'after')
 
-class Net(nn.Module):
 
+class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 320, kernel_size=5)
-        self.conv2 = nn.Conv2d(320, 640, kernel_size=5)
-        self.conv3 = nn.Conv2d(640, 1280, kernel_size=5)
-        self.dropout = nn.Dropout2d()
-        self.fc1 = nn.Linear(80640, 500)
-        self.fc2 = nn.Linear(500, 250)
-        self.fc3 = nn.Linear(250, 2)
+        self.conv1 = nn.Conv2d(3, 10, kernel_size=5)
+        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
+        self.conv2_drop = nn.Dropout2d()
+        self.fc1 = nn.Linear(7920, 50)
+        self.fc2 = nn.Linear(50, 2)
 
-    def forward(self, x):    
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))          
-        x = F.relu(F.max_pool2d(self.dropout(self.conv2(x)), 2))
-        x = F.relu(F.max_pool2d(self.dropout(self.conv3(x)), 2))
-        x = x.view(-1, 80640 )    
-        x = F.relu(self.fc1(x))	
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+        x = x.view(-1, 7920)
+        x = F.relu(self.fc1(x))
         x = F.dropout(x, training=self.training)
-        x = F.relu(self.fc2(x))
-        # 50 -> 10
-        x = self.fc3(x)       
-        # transform to logits
+        x = self.fc2(x)
         return F.log_softmax(x)
-   
-net=Net()
-net.cuda() 
-print(net)
-import torch.optim as optim
-
-criterion = nn.NLLLoss()
-optimizer = optim.SGD(net.parameters(), lr=0.005, momentum=0.0022)
-
-for epoch in range(1):  # loop over the dataset multiple times
-
-    running_loss = 0.0
-    for i, data in enumerate(trainloader, 0):
-        # get the inputs
-        inputs, labels = data
-
-        # wrap them in Variable
-        inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
-
-        # zero the parameter gradients
+      
+model = Net()
+model.share_memory() # gradients are allocated lazily, so they are not shared here
+def train_epoch(epoch, args, model, data_loader, optimizer):
+    model.train()
+    for batch_idx, (data, target) in enumerate(data_loader):
+        if args.cuda:
+            data, target = data.cuda(), target.cuda()      
+        data, target = Variable(data), Variable(target)
         optimizer.zero_grad()
-
-        # forward + backward + optimize
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
+        output = model(data)
+        loss = F.nll_loss(output, target)
         loss.backward()
         optimizer.step()
-
-        # print statistics
-        running_loss += loss.data[0]
-        if i % 100 == 99:    # print every 2000 mini-batches
-            print('[%d, %5d] loss: %.20f' %
-                  (epoch + 1, i + 1, running_loss / 100))
-            running_loss = 0.0
-
-print('Finished Training')
-
-for name, param in net.named_parameters():
-    if param.requires_grad:
-        print(name, param.data)
-dataiter = iter(testloader)
-images, labels = dataiter.next()
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(data_loader.dataset),
+                100. * batch_idx / len(data_loader), loss.data[0]))
 
 
-net.eval()
+def test_epoch(model, data_loader):
+    model.eval()
+    test_loss = 0
+    correct = 0
+    for data, target in data_loader:
+        if args.cuda:
+            data, target = data.cuda(), target.cuda()      
+        data, target = Variable(data, volatile=True), Variable(target)
+        output = model(data)
+        test_loss += F.nll_loss(output, target, size_average=False).data[0] # sum up batch loss
+        pred = output.data.max(1)[1] # get the index of the max log-probability
+        correct += pred.eq(target.data).cpu().sum()
 
-correct = 0
-total = 0
+    test_loss /= len(data_loader.dataset)
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(data_loader.dataset),
+        100. * correct / len(data_loader.dataset)))
 
-for data in testloader:
-	images, labels = data
-	images=images.cuda()
-	labels=labels.cuda()
-	outputs = net(Variable(images))
-	_, predicted = torch.max(outputs.data, 1)
-	total += labels.size(0)
-	correct += (predicted == labels).sum()
-    
-print('Correct: %d %%' % (
-    100 * correct / total))
-print(correct)
-print(total)
 
+# Run the training loop over the epochs (evaluate after each)
+if args.cuda:
+    model = model.cuda()
+optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+for epoch in range(1, args.epochs + 1):
+    train_epoch(epoch, args, model, train_loader, optimizer)
+    test_epoch(model, test_loader)    
